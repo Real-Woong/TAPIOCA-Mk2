@@ -1,0 +1,16 @@
+# 비밀값·개인 환경
+.env
+.env.*
+!.env.local.example
+
+# 수집 데이터·DB·로그 (용량 + 서버 데이터)
+data/
+
+# 접근 점검 결과 (공인 IP·호스트 이름 포함)
+probe-*.json
+
+# 도구 폴더
+.claude/
+node_modules/
+.DS_Store
+*.log

@@ -1,0 +1,27 @@
+{
+  "name": "tapioca-ver2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TAPIoca Ver2 — NASDAQ 거래량 급증·횡보·돌파 스크리너. 기존 ETF 자동매매(toss-ai-agent)와 완전히 분리된 프로젝트.",
+  "scripts": {
+    "probe": "node scripts/access-probe.mjs",
+    "collect": "node src/collect/collect-cli.js",
+    "push": "bash scripts/push.sh",
+    "receive": "node src/server/receive-cli.js",
+    "status": "node src/server/status-cli.js",
+    "test": "node --test",
+    "scan": "node src/compute/scan-cli.js",
+    "candidates": "node src/candidates/candidates-cli.js",
+    "paper": "node src/paper/paper-cli.js",
+    "report": "node src/notify/report-cli.js",
+    "sync": "bash scripts/sync.sh",
+    "server": "bash scripts/server.sh",
+    "fractional": "node src/broker/fractional-cli.js",
+    "candles-compare": "node src/broker/candles-compare-cli.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "//engines": "수집(src/collect)은 Node 20.12+. 서버(src/server)의 SQLite는 node:sqlite 때문에 Node 22.13+."
+}
