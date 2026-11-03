@@ -14,3 +14,6 @@ probe-*.json
 node_modules/
 .DS_Store
 *.log
+
+# 비서(Secretary)가 읽는 상태 파일 — 공개 저장소에 올리지 않는다
+_STATE.md
