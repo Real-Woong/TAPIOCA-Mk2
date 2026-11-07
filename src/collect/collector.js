@@ -91,7 +91,10 @@ export async function collect({
 
   const barsPath = path.join(outDir, "bars.jsonl");
   const failuresPath = path.join(outDir, "failures.jsonl");
-  const done = new Set((await readJsonl(barsPath)).map((line) => line.ticker));
+  const earlierLines = await readJsonl(barsPath);
+  const done = new Set(earlierLines.map((line) => line.ticker));
+  // 이어받기 전(이전 실행)에 받은 종목의 마지막 봉 날짜 — 끝에서 «구멍 난 묶음»을 다시 받을지 판단하는 재료
+  const earlierLast = new Map(earlierLines.map((line) => [line.ticker, line.bars.at(-1).date]));
   // NOT_FOUND는 다시 해도 같으므로 이어서 할 때 건너뜁니다. 차단·시간 초과는 다시 시도합니다.
   for (const failure of await readJsonl(failuresPath)) {
     if (failure.kind === "NOT_FOUND") done.add(failure.ticker);
@@ -118,6 +121,15 @@ export async function collect({
   let aborted = false;
   let droppedInvalid = 0;
   let droppedIncomplete = 0;
+  let newestLast = null; // 확인된 가장 최신 «마지막 봉» 날짜
+  const maxDate = (a, b) => (a === null || b > a ? b : a);
+  const barLine = (symbol, result, bars) => ({
+    ticker: symbol,
+    source,
+    fetchedAt: new Date().toISOString(),
+    adjustment: result.adjustment,
+    bars,
+  });
 
   for (let i = 0; i < todo.length; i += 1) {
     const symbol = todo[i];
@@ -145,14 +157,41 @@ export async function collect({
       await appendFile(failuresPath, `${JSON.stringify({ ticker: symbol, kind: "EMPTY", message: "정리 후 봉이 없음", at: new Date().toISOString() })}\n`);
       continue;
     }
-    await appendFile(
-      barsPath,
-      `${JSON.stringify({ ticker: symbol, source, fetchedAt: new Date().toISOString(), adjustment: result.adjustment, bars })}\n`,
-    );
+    await appendFile(barsPath, `${JSON.stringify(barLine(symbol, result, bars))}\n`);
+    newestLast = maxDate(newestLast, bars.at(-1).date);
     if ((i + 1) % 100 === 0) log(`${i + 1}/${todo.length}`);
   }
 
+  // ── 이어받기 보정: 이전 실행에서 받은 종목 중 마지막 봉이 «이번에 확인된 최신 날짜»보다 옛날인 종목을 다시 받습니다.
+  // 이어받기는 받은 종목을 건너뛰므로, 어떤 시각대에 소스가 당일 봉을 못 줘서 비어 있던 묶음이
+  // 그대로 확정되는 일이 있었습니다(11/3: 2차 실행분 831종목 중 810개가 기준일 봉 없이 stale).
+  // 이번 실행에서 처음 받은 종목은 대상이 아닙니다 — 같은 실행에서 소스가 이미 «이게 최신»이라고 답했습니다.
+  // 새 결과가 더 최신일 때만 바꿉니다(여전히 옛날이면 정지·거래 없음이므로 그대로 둡니다).
+  const replaced = new Map(); // ticker → 새 줄
+  if (!aborted && earlierLast.size > 0) {
+    for (const last of earlierLast.values()) newestLast = maxDate(newestLast, last);
+    const recheck = [...earlierLast].filter(([, last]) => newestLast && last < newestLast).map(([symbol]) => symbol);
+    if (recheck.length > 0) log(`이전 실행에서 받은 종목 중 기준일(${newestLast}) 봉이 없는 ${recheck.length}개를 다시 받습니다`);
+    for (let i = 0; i < recheck.length; i += 1) {
+      const symbol = recheck[i];
+      if (i > 0 || todo.length > 0) await sleep(delayMs);
+      const result = await fetchOne(symbol);
+      if (!result.ok) continue; // 실패하면 이전에 받은 줄을 그대로 둡니다
+      const finalized = dropIncompleteBars(cleanBars(result.bars).bars, now);
+      const bars = mode === "daily" ? finalized.bars.slice(-DAILY_KEEP_BARS) : finalized.bars;
+      if (bars.length && bars.at(-1).date > earlierLast.get(symbol)) replaced.set(symbol, barLine(symbol, result, bars));
+    }
+    if (recheck.length > 0) log(`다시 받아 최신이 된 종목 ${replaced.size}개`);
+  }
+
   // ── 포장: 파일에 실제로 있는 것을 다시 읽어 셉니다 (메모리 카운터를 믿지 않는다)
+  if (replaced.size > 0) {
+    // 같은 종목이 두 줄이 되지 않도록 옛 줄을 새 줄로 바꿔 파일을 다시 씁니다 (임시 파일 → 이름 바꾸기)
+    const merged = (await readJsonl(barsPath)).map((line) => replaced.get(line.ticker) ?? line);
+    const tmpBars = path.join(outDir, "bars.jsonl.tmp");
+    await writeFile(tmpBars, merged.map((line) => `${JSON.stringify(line)}\n`).join(""));
+    await rename(tmpBars, barsPath);
+  }
   const okLines = await readJsonl(barsPath);
   const okSet = new Set(okLines.map((line) => line.ticker));
   const latestFailure = new Map();
@@ -195,7 +234,8 @@ export async function collect({
       barsDroppedInvalid: droppedInvalid,
       barsDroppedIncomplete: droppedIncomplete,
     },
-    staleTickers: stale.slice(0, 200),
+    // 전부 싣습니다. 예전엔 200개에서 잘라 813개 중 200개만 서버 기록에 남았습니다.
+    staleTickers: stale,
     files: {
       universe: { name: "universe.json", sha256: sha256(universeBuffer) },
       bars: { name: "bars.jsonl", lines: okLines.length, sha256: sha256(barsBuffer) },

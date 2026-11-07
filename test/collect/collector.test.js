@@ -174,6 +174,78 @@ test("중단된 배치를 같은 폴더로 이어서 하면 받은 종목은 건
   });
 });
 
+test("stale 종목 목록은 200개에서 자르지 않고 전부 싣는다", async () => {
+  await withDir(async (dir) => {
+    const symbols = Array.from({ length: 250 }, (_, i) => `S${String(i).padStart(3, "0")}`);
+    const normal = Array.from({ length: 300 }, (_, i) => `OK${String(i).padStart(3, "0")}`); // 기준일은 다수결이라 정상 쪽이 더 많아야 한다
+    const manifest = await collect(base(dir, {
+      universe: universeOf(...normal, ...symbols),
+      fetchBarsImpl: async (symbol) => ({ bars: symbol.startsWith("S") ? days("2026-10-20") : days("2026-11-03"), adjustment: "x" }),
+    }));
+    assert.equal(manifest.counts.stale, 250);
+    assert.equal(manifest.staleTickers.length, 250);
+  });
+});
+
+test("이어받을 때 이전 실행에서 기준일 봉이 비어 있던 종목은 다시 받아 최신으로 바꾼다 (11/3 사고)", async () => {
+  await withDir(async (dir) => {
+    // 1차 실행: 소스가 당일(11/3) 봉을 못 주던 시각대 — A, B는 옛 봉만 받고 C에서 차단돼 중단
+    let phase = 1;
+    const asked = [];
+    const fetchBarsImpl = async (symbol) => {
+      asked.push(symbol);
+      if (phase === 1) {
+        if (symbol === "C") throw new BlockedError("HTTP 429");
+        return { bars: days("2026-10-30"), adjustment: "x" };
+      }
+      return { bars: days("2026-10-30", "2026-11-03"), adjustment: "x" };
+    };
+    const universe = universeOf("A", "B", "C", "D");
+    const first = await collect(base(dir, { universe, fetchBarsImpl, maxConsecutiveBlocks: 1 }));
+    assert.equal(first.status, "ABORTED");
+    assert.equal(first.counts.stale, 0); // 받은 건 전부 10/30이라 기준일이 10/30 — 이게 문제의 모양이다
+
+    phase = 2;
+    asked.length = 0;
+    const second = await collect(base(dir, { universe, fetchBarsImpl }));
+    assert.deepEqual(asked, ["C", "D", "A", "B"]); // 새 종목 먼저, 그다음 옛 종목 A·B를 다시
+    assert.equal(second.status, "COMPLETE");
+    assert.equal(second.asOf, "2026-11-03");
+    assert.equal(second.counts.stale, 0);
+    assert.equal(second.counts.atAsOf, 4);
+    // 같은 종목이 두 줄이 되지 않고, manifest 줄 수·해시가 파일과 맞는다
+    const lines = (await readFile(path.join(dir, "bars.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((l) => l.ticker).sort(), ["A", "B", "C", "D"]);
+    assert.equal(second.files.bars.lines, 4);
+  });
+});
+
+test("다시 받아도 여전히 옛 봉이면 그대로 두고, 이번 실행에서 받은 종목은 다시 받지 않는다", async () => {
+  await withDir(async (dir) => {
+    let phase = 1;
+    const asked = [];
+    const fetchBarsImpl = async (symbol) => {
+      asked.push(symbol);
+      if (phase === 1) {
+        if (symbol === "N") throw new BlockedError("HTTP 429");
+        return { bars: days("2026-10-30"), adjustment: "x" }; // H(거래 정지), A: 옛 봉
+      }
+      return { bars: symbol === "A" || symbol === "N" ? days("2026-11-03") : days("2026-10-30"), adjustment: "x" };
+    };
+    const universe = universeOf("A", "H", "N");
+    await collect(base(dir, { universe, fetchBarsImpl, maxConsecutiveBlocks: 1 }));
+
+    phase = 2;
+    asked.length = 0;
+    const second = await collect(base(dir, { universe, fetchBarsImpl }));
+    assert.deepEqual(asked, ["N", "A", "H"]); // N은 이번에 처음, A·H는 이전 실행분을 한 번씩만 다시
+    assert.equal(second.counts.stale, 1);
+    assert.deepEqual(second.staleTickers, [{ ticker: "H", last: "2026-10-30" }]); // 정지 종목은 그대로 stale
+    const lines = (await readFile(path.join(dir, "bars.jsonl"), "utf8")).trim().split("\n");
+    assert.equal(lines.length, 3);
+  });
+});
+
 test("이어서 할 때는 처음 정한 대상 목록을 쓴다 — 목록이 바뀌어도 manifest가 거짓이 되지 않는다", async () => {
   await withDir(async (dir) => {
     const fetchBarsImpl = async () => ({ bars: days("2026-11-03"), adjustment: "x" });
